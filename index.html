@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heart Attack Risk Check (ANN)</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#f6f2f1; --card:#ffffff; --ink:#24181a; --muted:#6d5b5e; --line:#e3d7d8;
+    --accent:#a3202f; --low:#1f8a5b; --mid:#c98a12; --high:#b3202f;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#171112; --card:#221a1c; --ink:#f3e9ea; --muted:#b5a3a6; --line:#3a2d30; --accent:#e5566a; --high:#ef5a6b; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Inter,system-ui,sans-serif}
+  main{max-width:1040px;margin:0 auto;padding:32px 20px 64px;display:grid;gap:28px;
+       grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);align-items:start}
+  header{grid-column:1/-1}
+  h1{font:800 clamp(2rem,5vw,3rem)/1.05 Fraunces,serif;margin:0 0 8px}
+  header p{margin:0;color:var(--muted);max-width:62ch}
+  form,.result{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px 16px;margin-bottom:20px}
+  label{display:grid;gap:4px;font-size:.85rem;color:var(--muted)}
+  input[type=number],select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;
+       background:var(--bg);color:var(--ink);font:inherit}
+  input:focus-visible,select:focus-visible,button:focus-visible{outline:3px solid var(--accent);outline-offset:1px}
+  button{width:100%;padding:13px;border:0;border-radius:10px;background:var(--accent);color:#fff;
+         font:600 1rem Inter,sans-serif;cursor:pointer}
+  .result{position:sticky;top:20px}
+  .result h2{font:600 1.1rem Fraunces,serif;margin:0 0 14px}
+  .empty{color:var(--muted)}
+  .pct{font:800 3.4rem/1 Fraunces,serif}
+  .bar{height:10px;border-radius:6px;background:var(--line);margin:14px 0;overflow:hidden}
+  .bar i{display:block;height:100%;width:0;transition:width .5s,background .3s}
+  .verdict{font-weight:600}
+  .note{font-size:.8rem;color:var(--muted);margin-top:16px}
+  #err{display:none;background:#b3202f22;border:1px solid var(--high);padding:12px;border-radius:10px;margin-bottom:16px}
+  @media (max-width:760px){ main{grid-template-columns:1fr} .grid{grid-template-columns:1fr} .result{position:static} }
+  @media (prefers-reduced-motion:reduce){ .bar i{transition:none} }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Heart attack risk check</h1>
+    <p id="sub">A neural network trained on CDC health survey responses. Fill in the form to see an estimated risk.</p>
+  </header>
+
+  <form id="f">
+    <div id="err">Model file not found. Run <code>train.py</code> first so <code>model_weights.js</code> sits next to this page.</div>
+    <div class="grid" id="fields"></div>
+    <button type="submit">Estimate risk</button>
+  </form>
+
+  <section class="result" aria-live="polite">
+    <h2>Result</h2>
+    <div id="out" class="empty">Your estimate will appear here.</div>
+  </section>
+</main>
+
+<script src="model_weights.js"></script>
+<script>
+const f = document.getElementById("f"), out = document.getElementById("out"), fields = document.getElementById("fields");
+const nice = s => s.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^Had /, "Ever had ");
+
+if (!window.MODEL) {
+  document.getElementById("err").style.display = "block";
+} else {
+  document.getElementById("sub").textContent =
+    `A neural network trained on ${MODEL.rows.toLocaleString()} CDC health survey responses. Fill in the form to see an estimated risk.`;
+  // Build the form from the schema saved by train.py
+  fields.innerHTML = MODEL.schema.map(s => s.type === "num"
+    ? `<label>${nice(s.name)} (${s.min}–${s.max})<input type="number" name="${s.name}" min="${s.min}" max="${s.max}" step="any" value="${s.default}" required></label>`
+    : `<label>${nice(s.name)}<select name="${s.name}">${s.options.map(o =>
+        `<option value="${o}"${o === s.default ? " selected" : ""}>${o}</option>`).join("")}</select></label>`
+  ).join("");
+}
+
+const relu = v => v > 0 ? v : 0, sigmoid = v => 1 / (1 + Math.exp(-v));
+
+function encode(data){
+  const v = [];
+  for (const s of MODEL.schema){
+    if (s.type === "num") v.push(parseFloat(data.get(s.name)));
+    else for (const o of s.options) v.push(data.get(s.name) === o ? 1 : 0);
+  }
+  return v;
+}
+function predict(row){
+  let a = row.map((x, i) => (x - MODEL.mean[i]) / MODEL.scale[i]);
+  for (const L of MODEL.layers){
+    const o = L.b.slice();
+    for (let j = 0; j < o.length; j++){
+      for (let i = 0; i < a.length; i++) o[j] += a[i] * L.W[i][j];
+      o[j] = L.act === "relu" ? relu(o[j]) : sigmoid(o[j]);
+    }
+    a = o;
+  }
+  return a[0];
+}
+
+f.addEventListener("submit", e => {
+  e.preventDefault();
+  if (!window.MODEL) return;
+  const p = predict(encode(new FormData(f)));
+  const pct = (p * 100).toFixed(1);
+  const [label, color] = p < 0.3 ? ["Lower risk", "var(--low)"] : p < 0.6 ? ["Moderate risk", "var(--mid)"] : ["Higher risk", "var(--high)"];
+  out.className = "";
+  out.innerHTML = `<div class="pct">${pct}%</div>
+    <div class="bar"><i style="width:${pct}%;background:${color}"></i></div>
+    <div class="verdict" style="color:${color}">${label}</div>
+    <p class="note">Model test accuracy: ${(MODEL.test_accuracy*100).toFixed(1)}%. Heart attacks are rare in this data, so the model was class-weighted and scores lean cautious. This is a student project, not medical advice.</p>`;
+});
+</script>
+</body>
+</html>
